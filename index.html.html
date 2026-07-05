@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Conversor PDF para Modelo - Conferência Carga Horária</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<style>
+:root{--azul:#163d73;--verde:#17a34a;--cinza:#f4f7fb;--borda:#cbd5e1;--texto:#263445;}
+*{box-sizing:border-box} body{margin:0;background:#eef3f8;font-family:Arial,Helvetica,sans-serif;color:var(--texto)}
+.wrap{max-width:1100px;margin:22px auto;background:white;border-radius:14px;padding:26px;box-shadow:0 10px 30px rgba(10,31,68,.12)}
+h1{margin:0 0 8px;color:var(--azul);font-size:28px} p{margin:8px 0 18px;line-height:1.45}
+.drop{border:3px dashed #94a3b8;border-radius:14px;padding:34px;text-align:center;background:#f8fafc;cursor:pointer;transition:.2s;margin:18px 0}
+.drop:hover,.drop.drag{background:#eff6ff;border-color:var(--azul)} .drop h2{margin:0 0 8px;color:var(--azul);font-size:22px}.drop small{display:block;color:#64748b}
+input[type=file]{position:absolute;left:-9999px}.btns{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}.btn{border:0;border-radius:10px;padding:13px 18px;font-weight:700;cursor:pointer;color:white;background:var(--azul)}.btn.green{background:var(--verde)}.btn:disabled{background:#94a3b8;cursor:not-allowed}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:20px 0}.card{border:1px solid var(--borda);border-radius:12px;background:#f8fafc;padding:16px}.card b{display:block;font-size:24px;color:var(--azul)}
+.progress{height:12px;background:#e2e8f0;border-radius:20px;overflow:hidden;margin:12px 0}.bar{height:100%;width:0;background:linear-gradient(90deg,#163d73,#17a34a);transition:.2s}
+.status{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:14px;min-height:120px;white-space:pre-wrap;font-family:Consolas,monospace;font-size:13px;max-height:260px;overflow:auto}
+.warn{padding:12px;border-left:5px solid #f59e0b;background:#fffbeb;border-radius:8px;margin:14px 0;color:#7c2d12}
+@media(max-width:800px){.cards{grid-template-columns:repeat(2,1fr)}.wrap{margin:0;border-radius:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Conversor de PDF - Conferência Carga Horária</h1>
+<p>Use somente o <b>PDF</b> do relatório <b>CONFERENCIA CARGA HORARIA PROFESSOR (POR CURSO)</b>. O Excel será gerado no padrão do arquivo <b>Modelo.xlsx</b>: abas <b>Detalhado</b>, <b>Resumo Professores</b>, <b>Resumo Cursos</b> e <b>Informações</b>.</p>
+<div class="warn"><b>Correção aplicada:</b> este conversor não usa o arquivo “Conferencia...” como modelo. Ele lê o PDF inteiro, linha por linha, monta o Excel no padrão do <b>Modelo.xlsx</b> e no Resumo Cursos conta professor uma única vez por curso, inclui a coluna <b>Quantidade de Disciplina</b> e calcula <b>quantidade, percentual individual, valor e C.H.</b> de Especialistas, Mestres e Doutores.</div>
+<div id="drop" class="drop"><h2>Clique aqui para anexar o PDF</h2><small>ou arraste o arquivo PDF para esta área</small><input id="pdfInput" type="file" accept="application/pdf,.pdf" /></div>
+<div class="btns"><button class="btn" id="selectBtn">Selecionar PDF</button><button class="btn green" id="downloadBtn" disabled>Baixar Excel no Modelo</button></div>
+<div class="progress"><div id="bar" class="bar"></div></div>
+<div class="cards"><div class="card"><b id="paginas">0</b>Páginas lidas</div><div class="card"><b id="linhas">0</b>Linhas extraídas</div><div class="card"><b id="cursos">0</b>Cursos</div><div class="card"><b id="professores">0</b>Professores</div></div>
+<h3>Status</h3><div id="status" class="status">Aguardando PDF...</div>
+</div>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const el={drop:document.getElementById('drop'), input:document.getElementById('pdfInput'), select:document.getElementById('selectBtn'), download:document.getElementById('downloadBtn'), bar:document.getElementById('bar'), status:document.getElementById('status'), paginas:document.getElementById('paginas'), linhas:document.getElementById('linhas'), cursos:document.getElementById('cursos'), professores:document.getElementById('professores')};
+let extractedRows=[], currentFileName='', reportDate='';
+function log(t){el.status.textContent += '\n'+t; el.status.scrollTop=el.status.scrollHeight}
+function setProgress(p){el.bar.style.width=Math.max(0,Math.min(100,p))+'%'}
+function clean(s){return String(s||'').replace(/\s+/g,' ').trim()}
+function toNum(s){ if(s===undefined||s===null||s==='')return 0; return Number(String(s).replace(/\./g,'').replace(',','.'))||0; }
+function br(n){return Number(n||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}
+function normTextKey(s){
+  return clean(s).toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Z0-9]+/g,' ').trim();
+}
+function normProfessor(s){
+  // Chave técnica mais forte para não contar o mesmo professor duas vezes no mesmo curso.
+  // Remove acentos, pontuação, títulos/cargos soltos e trata casos em que o nome venha duplicado no PDF.
+  let t=normTextKey(s);
+  t=t.replace(/\b(PROFESSOR|PROFESSORA|PROF|DOCENTE|TUTOR|TUTORA|ESPECIALISTA|MESTRE|MESTRA|DOUTOR|DOUTORA|DR|DRA|MSC|ME|ESP)\b/g,' ');
+  t=clean(t).toUpperCase();
+  const parts=t.split(' ');
+  // Se o PDF repetir exatamente o nome dentro da mesma célula, mantém apenas a primeira ocorrência.
+  if(parts.length%2===0){
+    const half=parts.length/2;
+    if(parts.slice(0,half).join(' ')===parts.slice(half).join(' ')) t=parts.slice(0,half).join(' ');
+  }
+  return normTextKey(t);
+}
+function normDisciplina(s){
+  // Conta disciplina pelo nome, sem diferenciar acentos, quebra de linha ou espaços.
+  return normTextKey(s);
+}
+const TITULACOES_DETALHADAS=[
+  'PROFESSOR (A) ESPECIALISTA',
+  'PROFESSOR (A) ESPECIALISTA I',
+  'PROFESSOR (A) MESTRE',
+  'PROFESSOR (A) MESTRE I',
+  'PROFESSOR (A) DOUTOR',
+  'PROFESSOR (A) DOUTOR I',
+  'Não identificado'
+];
+function detectarTitulacao(s){
+  // Agora a titulação é padronizada exatamente conforme aparece na aba Detalhado/RM.
+  // Ex.: PROFESSOR (A) MESTRE e PROFESSOR (A) MESTRE I ficam em categorias diferentes.
+  const t=normTextKey(s);
+  if(/\bDOUTOR(A)?\s+I\b|\bDR(A)?\s+I\b/.test(t)) return 'PROFESSOR (A) DOUTOR I';
+  if(/\bDOUTOR(A)?\b|\bDR(A)?\b/.test(t)) return 'PROFESSOR (A) DOUTOR';
+  if(/\bMESTRE(A)?\s+I\b|\bMSC\s+I\b|\bME\s+I\b/.test(t)) return 'PROFESSOR (A) MESTRE I';
+  if(/\bMESTRE(A)?\b|\bMSC\b|\bME\b/.test(t)) return 'PROFESSOR (A) MESTRE';
+  if(/\bESPECIALISTA\s+I\b|\bESP\s+I\b/.test(t)) return 'PROFESSOR (A) ESPECIALISTA I';
+  if(/\bESPECIALISTA\b|\bESP\b|\bPOS\s+GRAD\b|\bPOSGRAD\b/.test(t)) return 'PROFESSOR (A) ESPECIALISTA';
+  return 'Não identificado';
+}
+function prioridadeTitulacao(t){
+  return {
+    'Não identificado':0,
+    'PROFESSOR (A) ESPECIALISTA':1,
+    'PROFESSOR (A) ESPECIALISTA I':2,
+    'PROFESSOR (A) MESTRE':3,
+    'PROFESSOR (A) MESTRE I':4,
+    'PROFESSOR (A) DOUTOR':5,
+    'PROFESSOR (A) DOUTOR I':6
+  }[t]||0;
+}
+function pct(qtd,total){
+  return total ? qtd/total : 0;
+}
+const codeRe=/^(FIL\d+|F\d+|\d{3,6})$/; const turmaRe=/^PIT[A-Z0-9]+$/i; const moneyRe=/^\d{1,3},\d{2}$/; const dateRe=/^\d{2}\/\d{2}\/\d{4}$/;
+const cursosConhecidos=['ADMINISTRAÇÃO','BIOMEDICINA','DIREITO','EDUCAÇÃO FÍSICA','ENFERMAGEM','ESTÉTICA E COSMÉTICA','FARMÁCIA','FISIOTERAPIA','FONOAUDIOLOGIA','MEDICINA VETERINÁRIA','NUTRIÇÃO','ODONTOLOGIA','PEDAGOGIA','PSICOLOGIA','SISTEMAS DE INFORMAÇÃO','TERAPIA OCUPACIONAL'];
+function splitWords(items, pageHeight){
+  const words=[];
+  for(const it of items){
+    const str=clean(it.str); if(!str) continue;
+    const x0=it.transform[4], yPdf=it.transform[5];
+    const yTop=pageHeight-yPdf;
+    const parts=str.split(/\s+/); let offset=0; const totalChars=str.length || 1; const width=it.width || (str.length*4.5);
+    for(const part of parts){
+      const idx=str.indexOf(part, offset); const x=x0 + (idx<0?offset:idx) * width / totalChars; offset=(idx<0?offset:idx)+part.length+1;
+      words.push({x,y:yTop,text:part});
+    }
+  }
+  return words;
+}
+function lineGroups(words){
+  const sorted=[...words].sort((a,b)=>a.y-b.y||a.x-b.x), groups=[];
+  for(const w of sorted){
+    let g=groups.find(r=>Math.abs(r.y-w.y)<2.2);
+    if(!g){g={y:w.y,items:[]}; groups.push(g)}
+    g.items.push(w); g.y=(g.y*(g.items.length-1)+w.y)/g.items.length;
+  }
+  return groups.map(g=>({y:g.y,text:clean(g.items.sort((a,b)=>a.x-b.x).map(w=>w.text).join(' ')),items:g.items.sort((a,b)=>a.x-b.x)})).sort((a,b)=>a.y-b.y);
+}
+function detectCourse(groups,lastCourse){
+  for(const g of groups){
+    const t=g.text;
+    if(cursosConhecidos.includes(t)) return t;
+  }
+  return lastCourse;
+}
+function colName(x){
+  // Coordenadas do relatório RM em página paisagem A4. Baseado no Modelo.xlsx correto.
+  const cols=[['codigo',0,58],['professor',58,158],['funcao',158,297],['turma',297,375],['disciplina',375,518],['ch',518,555],['valorHora',555,601],['valorPago',601,634],['dtini',634,681],['dtfim',681,734],['dtdem',734,797],['comp',797,850]];
+  for(const c of cols){ if(x>=c[1]&&x<c[2]) return c[0]; }
+  return null;
+}
+function parsePageByCoordinates(words, pageNo, course){
+  const bases=words.filter(w=>w.y>78 && w.x<58 && codeRe.test(w.text)).sort((a,b)=>a.y-b.y||a.x-b.x);
+  const rows=[];
+  for(let i=0;i<bases.length;i++){
+    const base=bases[i]; const yStart=base.y-5.5; const yEnd=(i+1<bases.length?bases[i+1].y-3:590);
+    const bucket={codigo:[],professor:[],funcao:[],turma:[],disciplina:[],ch:[],valorHora:[],valorPago:[],dtini:[],dtfim:[],dtdem:[],comp:[]};
+    for(const w of words){
+      if(w.y>=yStart && w.y<yEnd){ const c=colName(w.x); if(c) bucket[c].push(w); }
+    }
+    const val={};
+    Object.keys(bucket).forEach(k=>{ val[k]=clean(bucket[k].sort((a,b)=>Math.round(a.y/3)*3-Math.round(b.y/3)*3 || a.x-b.x).map(w=>w.text).join(' ')); });
+    val.codigo=base.text;
+    // correção quando valor pago vem colado em valor hora por pequena variação do PDF
+    const vhParts=val.valorHora.match(/\d{1,3},\d{2}/g)||[];
+    if(!val.valorPago && vhParts.length>=2){ val.valorHora=vhParts[0]; val.valorPago=vhParts[1]; }
+    const datas=clean((val.dtini+' '+val.dtfim).trim()).match(/\d{2}\/\d{2}\/\d{4}/g)||[];
+    if(datas.length>=2){ val.dtini=datas[0]; val.dtfim=datas[1]; }
+    if(val.codigo && val.professor && val.turma && val.disciplina){
+      rows.push({Página:pageNo,Curso:course,Código:val.codigo,Professor:val.professor,Função:val.funcao,Turma:val.turma,Disciplina:val.disciplina,'C.H.':val.ch,'Valor Hora':val.valorHora,'Valor Pago':val.valorPago,'DT.INI':val.dtini,'DT.FIM':val.dtfim,'DT.DEM.':val.dtdem,'Comp Sal':val.comp||'S'});
+    }
+  }
+  return rows;
+}
+function buildSummaries(rows){
+  const profMap=new Map(), cursoMap=new Map(), profGeralMap=new Map();
+  for(const r of rows){
+    const cursoKey=normTextKey(r.Curso);
+    const profKey=normProfessor(r.Professor);
+    const discKey=normDisciplina(r.Disciplina);
+    const titulacao=detectarTitulacao(r.Função);
+
+    const k=cursoKey+'||'+profKey;
+    if(!profMap.has(k)) profMap.set(k,{Curso:r.Curso,Professor:r.Professor,ProfessorKey:profKey,titulacao:'Não identificado',funcoes:new Set(),vhs:new Set(),ch:0,pago:0,lanc:0,discs:new Set()});
+    const p=profMap.get(k);
+    if(clean(r.Professor).length > clean(p.Professor).length) p.Professor=clean(r.Professor);
+    if(prioridadeTitulacao(titulacao) > prioridadeTitulacao(p.titulacao)) p.titulacao=titulacao;
+    p.funcoes.add(clean(r.Função)); p.vhs.add(clean(r['Valor Hora'])); p.ch+=toNum(r['C.H.']); p.pago+=toNum(r['Valor Pago']); p.lanc++; p.discs.add(discKey+'|'+normTextKey(r.Turma));
+
+    if(!cursoMap.has(cursoKey)) cursoMap.set(cursoKey,{Curso:r.Curso,profs:new Map(),discs:new Map(),ch:0,pago:0,lanc:0,profVals:new Map(),profCH:new Map(),profVH:new Map()});
+    const c=cursoMap.get(cursoKey);
+    if(clean(r.Curso).length > clean(c.Curso).length) c.Curso=clean(r.Curso);
+    if(!c.profs.has(profKey)) c.profs.set(profKey,{nome:clean(r.Professor),titulacao:'Não identificado'});
+    const cp=c.profs.get(profKey);
+    if(clean(r.Professor).length > clean(cp.nome).length) cp.nome=clean(r.Professor);
+    if(prioridadeTitulacao(titulacao) > prioridadeTitulacao(cp.titulacao)) cp.titulacao=titulacao;
+    c.discs.set(discKey, clean(r.Disciplina));
+    c.ch+=toNum(r['C.H.']); c.pago+=toNum(r['Valor Pago']); c.lanc++;
+    c.profVals.set(profKey,(c.profVals.get(profKey)||0)+toNum(r['Valor Pago']));
+    c.profCH.set(profKey,(c.profCH.get(profKey)||0)+toNum(r['C.H.']));
+    const vhLinha=toNum(r['Valor Hora']); const chLinha=toNum(r['C.H.']);
+    if(!c.profVH.has(profKey)) c.profVH.set(profKey,{somaPonderada:0,ch:0,somaSimples:0,qtd:0});
+    const vhObj=c.profVH.get(profKey);
+    if(vhLinha>0){ vhObj.somaPonderada += vhLinha * chLinha; vhObj.ch += chLinha; vhObj.somaSimples += vhLinha; vhObj.qtd++; }
+
+    if(!profGeralMap.has(profKey)) profGeralMap.set(profKey,{nome:clean(r.Professor),titulacao:'Não identificado'});
+    const pg=profGeralMap.get(profKey);
+    if(clean(r.Professor).length > clean(pg.nome).length) pg.nome=clean(r.Professor);
+    if(prioridadeTitulacao(titulacao) > prioridadeTitulacao(pg.titulacao)) pg.titulacao=titulacao;
+  }
+
+  const profRows=[...profMap.values()].sort((a,b)=>a.Curso.localeCompare(b.Curso,'pt-BR')||a.Professor.localeCompare(b.Professor,'pt-BR')).map(p=>({Curso:p.Curso,Professor:p.Professor,'Titulação':p.titulacao,'Função(ões)':[...p.funcoes].filter(Boolean).join(' | '),'Valor Hora(s)':[...p.vhs].filter(Boolean).join(' | '),'Valor Hora Médio':p.ch ? p.pago/p.ch : 0,'C.H. Total':p.ch,'Valor Pago Total':p.pago,'Qtd. Lançamentos':p.lanc,'Qtd. Disciplinas/Turmas':p.discs.size}));
+
+  const cursoRows=[...cursoMap.values()].sort((a,b)=>a.Curso.localeCompare(b.Curso,'pt-BR')).map(c=>{
+    const profs=[...c.profs.values()];
+    const total=profs.length;
+    const counts={}, valorTit={}, chTit={}, vhTitBase={};
+    for(const tit of TITULACOES_DETALHADAS){ counts[tit]=0; valorTit[tit]=0; chTit[tit]=0; vhTitBase[tit]={somaPonderada:0,ch:0,somaSimples:0,qtd:0}; }
+    for(const p of profs){ const tit=TITULACOES_DETALHADAS.includes(p.titulacao)?p.titulacao:'Não identificado'; counts[tit]++; }
+    for(const [pk,valor] of c.profVals.entries()){ const tit=(c.profs.get(pk)||{}).titulacao || 'Não identificado'; valorTit[tit]=(valorTit[tit]||0)+valor; }
+    for(const [pk,ch] of c.profCH.entries()){ const tit=(c.profs.get(pk)||{}).titulacao || 'Não identificado'; chTit[tit]=(chTit[tit]||0)+ch; }
+    for(const [pk,vhObj] of c.profVH.entries()){
+      const tit=(c.profs.get(pk)||{}).titulacao || 'Não identificado';
+      const base=vhTitBase[tit] || vhTitBase['Não identificado'];
+      base.somaPonderada += vhObj.somaPonderada || 0; base.ch += vhObj.ch || 0; base.somaSimples += vhObj.somaSimples || 0; base.qtd += vhObj.qtd || 0;
+    }
+    const calcVH=(tit)=>{ const b=vhTitBase[tit] || {}; return b.ch>0 ? b.somaPonderada/b.ch : (b.qtd>0 ? b.somaSimples/b.qtd : 0); };
+    const row={Curso:c.Curso,'Qtd. Professores':total};
+    for(const tit of TITULACOES_DETALHADAS){ row['Qtd. '+tit]=counts[tit]||0; }
+    for(const tit of TITULACOES_DETALHADAS){ row['% '+tit]=pct(counts[tit]||0,total); }
+    for(const tit of TITULACOES_DETALHADAS){ row['Valor '+tit]=valorTit[tit]||0; }
+    for(const tit of TITULACOES_DETALHADAS){ row['C.H. '+tit]=chTit[tit]||0; }
+    for(const tit of TITULACOES_DETALHADAS){ row['Valor Hora '+tit]=calcVH(tit); }
+    row['Quantidade de Disciplina']=c.discs.size; row['C.H. Total']=c.ch; row['Valor Pago Total']=c.pago; row['Qtd. Lançamentos']=c.lanc;
+    return row;
+  });
+
+  const geralProfs=[...profGeralMap.values()]; const totalGeral=geralProfs.length;
+  const geralRows=[{Curso:'TOTAL GERAL','Qtd. Professores':totalGeral}];
+  for(const tit of TITULACOES_DETALHADAS){ geralRows[0]['Qtd. '+tit]=geralProfs.filter(p=>p.titulacao===tit).length; }
+  for(const tit of TITULACOES_DETALHADAS){ geralRows[0]['% '+tit]=pct(geralRows[0]['Qtd. '+tit],totalGeral); }
+  for(const tit of TITULACOES_DETALHADAS){ geralRows[0]['Valor '+tit]=''; }
+  for(const tit of TITULACOES_DETALHADAS){ geralRows[0]['C.H. '+tit]=''; }
+  for(const tit of TITULACOES_DETALHADAS){ geralRows[0]['Valor Hora '+tit]=''; }
+  geralRows[0]['Quantidade de Disciplina']=''; geralRows[0]['C.H. Total']=''; geralRows[0]['Valor Pago Total']=''; geralRows[0]['Qtd. Lançamentos']='';
+  return {profRows,cursoRows,cursoMap,geralRows};
+}
+function auditAfterRead(){
+  const {cursoRows,cursoMap}=buildSummaries(extractedRows);
+  log('--- VARREDURA DO ARQUIVO COMPLETO ---');
+  log('Páginas processadas: '+el.paginas.textContent);
+  log('Linhas extraídas no total: '+extractedRows.length);
+  for(const c of cursoRows){
+    const cm=[...cursoMap.values()].find(x=>x.Curso===c.Curso) || null;
+    const profList=cm ? [...cm.profs.values()].map(p=>p.nome+' ('+p.titulacao+')').sort((a,b)=>a.localeCompare(b,'pt-BR')).join('; ') : '';
+    log(`${c.Curso}: ${c['Qtd. Professores']} professores únicos | ${c['Quantidade de Disciplina']} disciplinas | ${c['Qtd. Lançamentos']} lançamentos`);
+    if(c.Curso==='ADMINISTRAÇÃO') log('Professores únicos em ADMINISTRAÇÃO: '+profList);
+  }
+  const adm=cursoRows.find(c=>c.Curso==='ADMINISTRAÇÃO');
+  if(adm && adm['Qtd. Professores']!==5) log('ATENÇÃO: Administração deveria ficar com 5 professores únicos no PDF modelo. Verifique nomes extraídos acima.');
+  else if(adm) log('OK: Administração conferida com 5 professores únicos.');
+}
+function styleSheet(ws, range, moneyCols=[], numCols=[]){
+  const ref=XLSX.utils.decode_range(ws['!ref']);
+  for(let R=ref.s.r;R<=ref.e.r;R++) for(let C=ref.s.c;C<=ref.e.c;C++){
+    const addr=XLSX.utils.encode_cell({r:R,c:C}); if(!ws[addr]) continue;
+    ws[addr].s={font:{name:'Calibri',sz:11,color:{rgb:'1F2937'}},alignment:{vertical:'center',wrapText:true},border:{top:{style:'thin',color:{rgb:'D9E2EC'}},bottom:{style:'thin',color:{rgb:'D9E2EC'}},left:{style:'thin',color:{rgb:'D9E2EC'}},right:{style:'thin',color:{rgb:'D9E2EC'}}}};
+    if(R===0) ws[addr].s={font:{name:'Calibri',sz:11,bold:true,color:{rgb:'FFFFFF'}},fill:{fgColor:{rgb:'1F4E78'}},alignment:{horizontal:'center',vertical:'center',wrapText:true},border:{top:{style:'thin',color:{rgb:'1F4E78'}},bottom:{style:'thin',color:{rgb:'1F4E78'}},left:{style:'thin',color:{rgb:'1F4E78'}},right:{style:'thin',color:{rgb:'1F4E78'}}}};
+  }
+  ws['!freeze']={xSplit:0,ySplit:1};
+}
+const ACCOUNTING_FORMAT='_-[$R$-416] * #,##0.00_-;_-[$R$-416] * -#,##0.00_-;_-[$R$-416] * "-"??_-;_-@_-';
+const NUMBER_FORMAT='#,##0.00';
+function formatColumns(ws, colIndexes, z){
+  if(!ws['!ref']) return;
+  const ref=XLSX.utils.decode_range(ws['!ref']);
+  for(let R=1; R<=ref.e.r; R++){
+    for(const C of colIndexes){
+      const addr=XLSX.utils.encode_cell({r:R,c:C});
+      if(ws[addr]) ws[addr].z=z;
+    }
+  }
+}
+
+function addCostSimulator(ws, cursoRows, geralRows){
+  // Simulador abaixo da última linha do Resumo Cursos.
+  // Agora usa as titulações exatas da aba Detalhado/RM, separando MESTRE de MESTRE I, DOUTOR de DOUTOR I etc.
+  const totalSummaryRows = cursoRows.length + geralRows.length;
+  const startRow = totalSummaryRows + 3;
+  const headerRowExcel = startRow + 3;
+  const simDataStartExcel = headerRowExcel + 1;
+
+  XLSX.utils.sheet_add_aoa(ws, [
+    ['SIMULADOR DE CUSTOS POR TITULAÇÃO EXATA'],
+    ['Altere "Qtd. Simulada" e "C.H. Simulada". O custo usa o valor-hora real encontrado no Detalhado para a titulação exata: ESPECIALISTA, ESPECIALISTA I, MESTRE, MESTRE I, DOUTOR ou DOUTOR I.'],
+    ['Curso','Titulação exata','Qtd. Atual','Qtd. Simulada','C.H. Atual','C.H. Média/Professor','C.H. Simulada','Valor Hora Atual','Custo Atual','Custo Simulado','Diferença']
+  ], {origin:{r:startRow,c:0}});
+
+  let out=[];
+  for(const row of cursoRows){
+    const curso=row.Curso;
+    for(const tit of TITULACOES_DETALHADAS){
+      const qtd=Number(row['Qtd. '+tit]||0);
+      const ch=Number(row['C.H. '+tit]||0);
+      const valor=Number(row['Valor '+tit]||0);
+      const vh=Number(row['Valor Hora '+tit]||0);
+      out.push([
+        curso,
+        tit,
+        qtd,
+        qtd,
+        ch,
+        qtd>0 ? ch/qtd : 0,
+        null,
+        vh,
+        valor,
+        null,
+        null
+      ]);
+    }
+  }
+  XLSX.utils.sheet_add_aoa(ws, out, {origin:{r:simDataStartExcel-1,c:0}});
+
+  const simRows = out.length;
+  for(let r=0; r<simRows; r++){
+    const excelRow = simDataStartExcel + r;
+    ws[`G${excelRow}`] = {f:`D${excelRow}*F${excelRow}`, t:'n'};
+    ws[`J${excelRow}`] = {f:`G${excelRow}*H${excelRow}`, t:'n'};
+    ws[`K${excelRow}`] = {f:`J${excelRow}-I${excelRow}`, t:'n'};
+  }
+
+  const totalRow = simDataStartExcel + simRows;
+  XLSX.utils.sheet_add_aoa(ws, [[
+    'TOTAL SIMULADO','', '', '',
+    {f:`SUM(E${simDataStartExcel}:E${totalRow-1})`, t:'n'},
+    '',
+    {f:`SUM(G${simDataStartExcel}:G${totalRow-1})`, t:'n'},
+    '',
+    {f:`SUM(I${simDataStartExcel}:I${totalRow-1})`, t:'n'},
+    {f:`SUM(J${simDataStartExcel}:J${totalRow-1})`, t:'n'},
+    {f:`SUM(K${simDataStartExcel}:K${totalRow-1})`, t:'n'}
+  ]], {origin:{r:totalRow-1,c:0}});
+
+  if(!ws['!merges']) ws['!merges']=[];
+  ws['!merges'].push({s:{r:startRow,c:0},e:{r:startRow,c:10}});
+  ws['!merges'].push({s:{r:startRow+1,c:0},e:{r:startRow+1,c:10}});
+  return {startRow, headerRow:headerRowExcel-1, dataStart:simDataStartExcel-1, dataEnd:totalRow-1};
+}
+function styleCostSimulator(ws, simInfo){
+  if(!simInfo) return;
+  const titleAddr=XLSX.utils.encode_cell({r:simInfo.startRow,c:0});
+  if(ws[titleAddr]) ws[titleAddr].s={font:{name:'Calibri',sz:14,bold:true,color:{rgb:'FFFFFF'}},fill:{fgColor:{rgb:'17365D'}},alignment:{horizontal:'center',vertical:'center'},border:{top:{style:'thin',color:{rgb:'17365D'}},bottom:{style:'thin',color:{rgb:'17365D'}},left:{style:'thin',color:{rgb:'17365D'}},right:{style:'thin',color:{rgb:'17365D'}}}};
+  const noteAddr=XLSX.utils.encode_cell({r:simInfo.startRow+1,c:0});
+  if(ws[noteAddr]) ws[noteAddr].s={font:{name:'Calibri',sz:10,italic:true,color:{rgb:'7C2D12'}},fill:{fgColor:{rgb:'FFF2CC'}},alignment:{horizontal:'left',vertical:'center',wrapText:true},border:{top:{style:'thin',color:{rgb:'F59E0B'}},bottom:{style:'thin',color:{rgb:'F59E0B'}},left:{style:'thin',color:{rgb:'F59E0B'}},right:{style:'thin',color:{rgb:'F59E0B'}}}};
+  for(let C=0; C<=10; C++){
+    const addr=XLSX.utils.encode_cell({r:simInfo.headerRow,c:C});
+    if(ws[addr]) ws[addr].s={font:{name:'Calibri',sz:11,bold:true,color:{rgb:'FFFFFF'}},fill:{fgColor:{rgb:'1F4E78'}},alignment:{horizontal:'center',vertical:'center',wrapText:true},border:{top:{style:'thin',color:{rgb:'1F4E78'}},bottom:{style:'thin',color:{rgb:'1F4E78'}},left:{style:'thin',color:{rgb:'1F4E78'}},right:{style:'thin',color:{rgb:'1F4E78'}}}};
+  }
+  for(let R=simInfo.dataStart; R<=simInfo.dataEnd; R++){
+    for(let C=0; C<=10; C++){
+      const addr=XLSX.utils.encode_cell({r:R,c:C});
+      if(!ws[addr]) continue;
+      ws[addr].s=ws[addr].s||{};
+      ws[addr].s.border={top:{style:'thin',color:{rgb:'D9E2EC'}},bottom:{style:'thin',color:{rgb:'D9E2EC'}},left:{style:'thin',color:{rgb:'D9E2EC'}},right:{style:'thin',color:{rgb:'D9E2EC'}}};
+      ws[addr].s.alignment={vertical:'center',wrapText:true};
+      ws[addr].s.font={name:'Calibri',sz:11,color:{rgb:'1F2937'}};
+    }
+    for(const inputC of [3,6]){
+      const inputAddr=XLSX.utils.encode_cell({r:R,c:inputC});
+      if(ws[inputAddr]) ws[inputAddr].s={...ws[inputAddr].s,fill:{fgColor:{rgb:'E2F0D9'}},font:{name:'Calibri',sz:11,bold:true,color:{rgb:'1F2937'}},alignment:{horizontal:'center',vertical:'center'}};
+    }
+  }
+  for(let C=0; C<=10; C++){
+    const addr=XLSX.utils.encode_cell({r:simInfo.dataEnd,c:C});
+    if(ws[addr]) ws[addr].s={...ws[addr].s,font:{name:'Calibri',sz:11,bold:true,color:{rgb:'FFFFFF'}},fill:{fgColor:{rgb:'548235'}},alignment:{horizontal:C<8?'left':'right',vertical:'center'}};
+  }
+  for(let R=simInfo.dataStart; R<=simInfo.dataEnd; R++){
+    for(const C of [4,5,6]){ const a=XLSX.utils.encode_cell({r:R,c:C}); if(ws[a]) ws[a].z=NUMBER_FORMAT; }
+    for(const C of [7,8,9,10]){ const a=XLSX.utils.encode_cell({r:R,c:C}); if(ws[a]) ws[a].z=ACCOUNTING_FORMAT; }
+  }
+}
+
+function makeWorkbook(){
+  const headers=['Página','Curso','Código','Professor','Função','Turma','Disciplina','C.H.','Valor Hora','Valor Pago','DT.INI','DT.FIM','DT.DEM.','Comp Sal'];
+  const rows=extractedRows.map(r=>headers.map(h=>['C.H.','Valor Hora','Valor Pago'].includes(h)?toNum(r[h]):r[h]));
+  const wb=XLSX.utils.book_new();
+  const wsDet=XLSX.utils.aoa_to_sheet([headers,...rows]); wsDet['!cols']=[{wch:8},{wch:26},{wch:13},{wch:35},{wch:30},{wch:17},{wch:45},{wch:10},{wch:12},{wch:13},{wch:13},{wch:13},{wch:13},{wch:10}];
+  styleSheet(wsDet); formatColumns(wsDet,[8,9],ACCOUNTING_FORMAT); XLSX.utils.book_append_sheet(wb,wsDet,'Detalhado');
+
+  const {profRows,cursoRows,geralRows}=buildSummaries(extractedRows);
+  const ph=['Curso','Professor','Titulação','Função(ões)','Valor Hora(s)','Valor Hora Médio','C.H. Total','Valor Pago Total','Qtd. Lançamentos','Qtd. Disciplinas/Turmas'];
+  const wsProf=XLSX.utils.json_to_sheet(profRows,{header:ph}); wsProf['!cols']=[{wch:26},{wch:35},{wch:24},{wch:32},{wch:16},{wch:17},{wch:13},{wch:17},{wch:16},{wch:22}];
+  styleSheet(wsProf); formatColumns(wsProf,[4,5,7],ACCOUNTING_FORMAT); XLSX.utils.book_append_sheet(wb,wsProf,'Resumo Professores');
+
+  const ch=['Curso','Qtd. Professores',
+    ...TITULACOES_DETALHADAS.map(t=>'Qtd. '+t),
+    ...TITULACOES_DETALHADAS.map(t=>'% '+t),
+    ...TITULACOES_DETALHADAS.map(t=>'Valor '+t),
+    ...TITULACOES_DETALHADAS.map(t=>'C.H. '+t),
+    ...TITULACOES_DETALHADAS.map(t=>'Valor Hora '+t),
+    'Quantidade de Disciplina','C.H. Total','Valor Pago Total','Qtd. Lançamentos'
+  ];
+  const wsCur=XLSX.utils.json_to_sheet([...cursoRows,...geralRows],{header:ch});
+  wsCur['!cols']=ch.map((h,i)=>({wch:i===0?28:(h.length>24?24:18)}));
+  const simInfo=addCostSimulator(wsCur,cursoRows,geralRows);
+  styleSheet(wsCur);
+  if(wsCur['!ref']){
+    const qtdTit=TITULACOES_DETALHADAS.length;
+    const percentStart=2+qtdTit;
+    const valorStart=percentStart+qtdTit;
+    const chStart=valorStart+qtdTit;
+    const vhStart=chStart+qtdTit;
+    const afterTit=vhStart+qtdTit;
+    const rg=XLSX.utils.decode_range(wsCur['!ref']);
+    for(let R=1; R<=cursoRows.length+geralRows.length; R++){
+      for(let C=percentStart; C<valorStart; C++){ const addr=XLSX.utils.encode_cell({r:R,c:C}); if(wsCur[addr]) wsCur[addr].z='0.00%'; }
+    }
+    formatColumns(wsCur,Array.from({length:qtdTit},(_,i)=>valorStart+i),ACCOUNTING_FORMAT);
+    formatColumns(wsCur,[afterTit+2],ACCOUNTING_FORMAT); // Valor Pago Total
+    formatColumns(wsCur,Array.from({length:qtdTit},(_,i)=>chStart+i),NUMBER_FORMAT);
+    formatColumns(wsCur,[afterTit+1],NUMBER_FORMAT); // C.H. Total
+    formatColumns(wsCur,Array.from({length:qtdTit},(_,i)=>vhStart+i),ACCOUNTING_FORMAT);
+  }
+  styleCostSimulator(wsCur,simInfo); XLSX.utils.book_append_sheet(wb,wsCur,'Resumo Cursos');
+
+  const info=[['Arquivo de origem',currentFileName],['Data do relatório no PDF',reportDate||'Não identificada'],['Total de linhas extraídas',extractedRows.length],['Total de cursos',new Set(extractedRows.map(r=>r.Curso)).size],['Total de combinações curso/professor',profRows.length],['Observação','A aba Detalhado contém os lançamentos linha a linha extraídos do PDF. As abas de resumo consolidam automaticamente por professor e curso. O Resumo Cursos e o simulador usam as titulações exatas encontradas na coluna Função: PROFESSOR (A) ESPECIALISTA, PROFESSOR (A) ESPECIALISTA I, PROFESSOR (A) MESTRE, PROFESSOR (A) MESTRE I, PROFESSOR (A) DOUTOR e PROFESSOR (A) DOUTOR I.']];
+  const wsInfo=XLSX.utils.aoa_to_sheet(info); wsInfo['!cols']=[{wch:34},{wch:120}]; styleSheet(wsInfo); XLSX.utils.book_append_sheet(wb,wsInfo,'Informações');
+  return wb;
+}
+async function handleFile(file){
+  if(!file||!file.name.toLowerCase().endsWith('.pdf')){alert('Anexe um arquivo PDF.');return;}
+  currentFileName=file.name; extractedRows=[]; reportDate=''; el.status.textContent='Lendo PDF inteiro...'; el.download.disabled=true; setProgress(0);
+  const buf=await file.arrayBuffer(); const pdf=await pdfjsLib.getDocument({data:buf}).promise; let course='';
+  el.paginas.textContent=pdf.numPages;
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p); const text=await page.getTextContent({normalizeWhitespace:true,disableCombineTextItems:false});
+    const viewport=page.getViewport({scale:1}); const words=splitWords(text.items, viewport.height); const groups=lineGroups(words);
+    const dateLine=groups.map(g=>g.text).find(t=>/\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}/.test(t)); if(dateLine&&!reportDate) reportDate=(dateLine.match(/\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}/)||[''])[0];
+    course=detectCourse(groups,course);
+    const pr=parsePageByCoordinates(words,p,course); extractedRows.push(...pr);
+    log(`Página ${p}/${pdf.numPages}: ${pr.length} linhas extraídas${course?' | '+course:''}`); setProgress(p/pdf.numPages*100);
+  }
+  // remove duplicidades reais por combinação completa
+  const seen=new Set(); extractedRows=extractedRows.filter(r=>{const k=JSON.stringify([r.Página,r.Curso,r.Código,r.Professor,r.Turma,r.Disciplina,r['C.H.'],r['DT.INI'],r['DT.FIM']]); if(seen.has(k))return false; seen.add(k); return true;});
+  el.linhas.textContent=extractedRows.length; el.cursos.textContent=new Set(extractedRows.map(r=>normTextKey(r.Curso))).size; el.professores.textContent=new Set(extractedRows.map(r=>normProfessor(r.Professor))).size;
+  if(extractedRows.length===0){log('ERRO: nenhum lançamento foi encontrado. Verifique se o PDF é do relatório correto ou se é imagem digitalizada sem texto.'); return;}
+  log(`Concluído. Total: ${extractedRows.length} linhas, ${new Set(extractedRows.map(r=>r.Curso)).size} cursos, ${new Set(extractedRows.map(r=>normProfessor(r.Professor))).size} professores únicos gerais.`);
+  auditAfterRead();
+  el.download.disabled=false;
+}
+el.select.onclick=()=>el.input.click(); el.drop.onclick=()=>el.input.click(); el.input.onchange=e=>handleFile(e.target.files[0]);
+el.drop.ondragover=e=>{e.preventDefault();el.drop.classList.add('drag')}; el.drop.ondragleave=()=>el.drop.classList.remove('drag'); el.drop.ondrop=e=>{e.preventDefault();el.drop.classList.remove('drag');handleFile(e.dataTransfer.files[0]);};
+el.download.onclick=()=>{ const wb=makeWorkbook(); XLSX.writeFile(wb,'Conferencia_Carga_Horaria_Professores_Por_Curso.xlsx'); };
+</script>
+</body>
+</html>
